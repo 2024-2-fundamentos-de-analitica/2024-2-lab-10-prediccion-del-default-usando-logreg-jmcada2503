@@ -95,3 +95,90 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+import pandas as pd
+import numpy as np
+import gzip
+import pickle
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import precision_score, balanced_accuracy_score, recall_score, f1_score, confusion_matrix
+import json
+import os
+
+train_df = pd.read_csv("files/input/train_data.csv.zip", compression="zip")
+test_df = pd.read_csv("files/input/test_data.csv.zip", compression="zip")
+
+train_df = train_df.rename(columns={'default payment next month': 'default'})
+test_df = test_df.rename(columns={'default payment next month': 'default'})
+train_df.drop(columns=['ID'], inplace=True, errors='ignore')
+test_df.drop(columns=['ID'], inplace=True, errors='ignore')
+train_df.dropna(inplace=True)
+test_df.dropna(inplace=True)
+train_df = train_df[(train_df["EDUCATION"] != 0) & (train_df["MARRIAGE"] != 0)]
+test_df = test_df[(test_df["EDUCATION"] != 0) & (test_df["MARRIAGE"] != 0)]
+train_df["EDUCATION"] = train_df["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
+test_df["EDUCATION"] = test_df["EDUCATION"].apply(lambda x: 4 if x > 4 else x)
+
+x_train_data, y_train_data = train_df.drop(columns=['default']), train_df['default']
+x_test_data, y_test_data = test_df.drop(columns=['default']), test_df['default']
+categorical_cols = x_train_data.select_dtypes(include=['object', 'category']).columns.tolist()
+
+column_transformer = ColumnTransformer([
+    ('cat', OneHotEncoder(handle_unknown='ignore', sparse_output=False), categorical_cols)],
+    remainder='passthrough'
+)
+pipeline_model = Pipeline([
+    ('preprocessor', column_transformer),
+    ('scaler', MinMaxScaler()),
+    ('feature_selector', SelectKBest(score_func=f_classif, k=10)),
+    ('classifier', LogisticRegression(max_iter=500, random_state=42))
+])
+
+hyperparams = {
+    'feature_selector__k': range(1, 11),
+    'classifier__C': [0.001, 0.01, 0.1, 1, 10, 100],
+    'classifier__penalty': ['l1', 'l2'],
+    'classifier__solver': ['liblinear'],
+    "classifier__max_iter": [100, 200]
+}
+grid_search_cv = GridSearchCV(pipeline_model, param_grid=hyperparams, cv=10, scoring='balanced_accuracy', n_jobs=-1, refit=True)
+grid_search_cv.fit(x_train_data, y_train_data)
+
+os.makedirs("files/models/", exist_ok=True)
+with gzip.open("files/models/model.pkl.gz", 'wb') as file:
+    pickle.dump(grid_search_cv, file)
+
+def compute_metrics(y_true, y_pred, dataset):
+    return {
+        'type': 'metrics',
+        'dataset': dataset,
+        'precision': precision_score(y_true, y_pred),
+        'balanced_accuracy': balanced_accuracy_score(y_true, y_pred),
+        'recall': recall_score(y_true, y_pred),
+        'f1_score': f1_score(y_true, y_pred)
+    }
+
+def confusion_matrix_data(y_true, y_pred, dataset):
+    cm_matrix = confusion_matrix(y_true, y_pred)
+    return {
+        'type': 'cm_matrix',
+        'dataset': dataset,
+        'true_0': {"predicted_0": int(cm_matrix[0, 0]), "predicted_1": int(cm_matrix[0, 1])},
+        'true_1': {"predicted_0": int(cm_matrix[1, 0]), "predicted_1": int(cm_matrix[1, 1])}
+    }
+
+metrics_results = [
+    compute_metrics(y_train_data, grid_search_cv.predict(x_train_data), 'train'),
+    compute_metrics(y_test_data, grid_search_cv.predict(x_test_data), 'test'),
+    confusion_matrix_data(y_train_data, grid_search_cv.predict(x_train_data), 'train'),
+    confusion_matrix_data(y_test_data, grid_search_cv.predict(x_test_data), 'test')
+]
+
+os.makedirs("files/output/", exist_ok=True)
+with open("files/output/metrics.json", "w") as file:
+    for result in metrics_results:
+        file.write(json.dumps(result) + "\n")
